@@ -1,0 +1,94 @@
+version: "3"
+services:
+
+  init-guacamole-db:
+    image: guacamole/guacamole:latest
+    container_name: init-guacamole-db
+    command: ["/bin/sh", "-c", "test -e /init/initdb.sql && echo 'init file already exists' || /opt/guacamole/bin/initdb.sh --postgres > /init/initdb.sql && sed -i s/guacadmin/${GUAC_ADMIN}/g /init/initdb.sql" ]
+    volumes:
+      - dbinit:/init    
+
+
+  traefik:
+    container_name: traefik
+    image: traefik:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # The Web UI (enabled by --api.insecure=true)
+      - "8080:8080"
+    environment:
+      TZ: "Europe/Stockholm"
+      TRAEFIK_ACCESSLOG: "false"
+      TRAEFIK_API_INSECURE: "true"
+      TRAEFIK_LOG_LEVEL: "WARN"
+      TRAEFIK_ENTRYPOINTS_web_ADDRESS: ":80"
+      TRAEFIK_ENTRYPOINTS_web_HTTP_REDIRECTIONS_ENTRYPOINT_TO: "websecure"
+      TRAEFIK_ENTRYPOINTS_web_HTTP_REDIRECTIONS_ENTRYPOINT_SCHEME: "https"
+      TRAEFIK_ENTRYPOINTS_web_HTTP_REDIRECTIONS_ENTRYPOINT_PERMANENT: "true"
+      TRAEFIK_ENTRYPOINTS_websecure_ADDRESS: ":443"
+      TRAEFIK_ENTRYPOINTS_websecure_HTTP_TLS_CERTRESOLVER: "letsencrypt"
+      TRAEFIK_CERTIFICATESRESOLVERS_letsencrypt_ACME_DNSCHALLENGE_PROVIDER: "azure"
+      TRAEFIK_CERTIFICATESRESOLVERS_letsencrypt_ACME_EMAIL: "${TLS_EMAIL}"
+      TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT: "false"
+      AZURE_CLIENT_ID: "${TLS_CLIENT_ID}"
+      AZURE_CLIENT_SECRET: "${TLS_CLIENT_SECRET}"
+      AZURE_TENANT_ID: "${TENANT_ID}"
+      AZURE_SUBSCRIPTION_ID: "${TLS_SUBSCRIPTION_ID}"
+      AZURE_RESOURCE_GROUP: "${TLS_RESOURCE_GROUP}"
+    volumes:
+      # So that Traefik can listen to the Docker events
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    restart: unless-stopped
+    volumes:
+      - dbinit:/docker-entrypoint-initdb.d        
+      - dbdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      - init-guacamole-db
+
+  guacd:
+    image: guacamole/guacd:latest
+    container_name: guacd
+    restart: unless-stopped
+
+  guac:
+    image: guacamole/guacamole:latest
+    container_name: guacamole
+    restart: unless-stopped
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.guacamole.rule: "Host(`${GUAC_FQDN}`)"
+      traefik.http.middlewares.guac-redirect.redirectregex.regex: "^https://${GUAC_FQDN}/$$"
+      traefik.http.middlewares.guac-redirect.redirectregex.replacement: "https://${GUAC_FQDN}/guacamole"
+      traefik.http.middlewares.guac-redirect.redirectregex.permanent: "true"
+      traefik.http.routers.guacamole.middlewares: "guac-redirect@docker"
+      traefik.http.services.guacamole.loadbalancer.server.port: "8080"
+      traefik.http.routers.guacamole.entrypoints: "websecure"
+    environment:
+      TZ: "Europe/Stockholm"
+      GUACD_HOSTNAME: "guacd"
+      POSTGRES_HOSTNAME: "postgres"
+      POSTGRES_DATABASE: "${POSTGRES_USER}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_USER_REQUIRED: "true"
+      OPENID_AUTHORIZATION_ENDPOINT: "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/authorize"
+      OPENID_JWKS_ENDPOINT: "https://login.microsoftonline.com/${TENANT_ID}/discovery/v2.0/keys"
+      OPENID_ISSUER: "https://login.microsoftonline.com/${TENANT_ID}/v2.0"
+      OPENID_CLIENT_ID: "${OPENID_CLIENT_ID}"
+      OPENID_REDIRECT_URI: "https://${GUAC_FQDN}/guacamole"
+    depends_on:
+      - postgres
+      - guacd
+
+volumes:
+  dbinit:
+  dbdata:
